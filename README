@@ -1,3 +1,19 @@
+Welcome to the Jabberd2s wiki!
+
+This project is based on Jabberd-2.3.2, the current stable version of Jabberd2.
+
+What`s difference
+
+Add dynamic configuration for multi-domain of XMPP servers(so named it Jabberd2s :) )
+ - Switch XMPP server`s status(online/offline) without restart Jabberd2 by modify the sm.xml and the c2s.xml file directly.
+
+Add refconfiguration mechanism
+ - Change the reaction of SIGUSR1 and SIGUSR2, SIGUSR1 will trigger the reconfiguration, SIGUSR2 switch debug status.
+ 
+ -- unplugged coder
+
+--------------------------------------------------------------------------------
+
 README for Jabber Open Source Server (2.2)
 
 Thanks for downloading jabberd 2.2. Below are some basic instructions to
