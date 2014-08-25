@@ -1,0 +1,11 @@
+[Unit]
+Description=Jabber IM Session Manager
+After=network.target
+BindTo=jabberd.service
+
+[Service]
+User=jabber
+ExecStart=/usr/local/bin/sm -c /usr/local/etc/sm.xml
+
+[Install]
+WantedBy=multi-user.target
