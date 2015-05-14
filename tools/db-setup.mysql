@@ -202,3 +202,21 @@ CREATE TABLE `status` (
     `last-login` INT DEFAULT '0',
     `last-logout` INT DEFAULT '0',
     `xml` TEXT ) DEFAULT CHARSET=UTF8;
+
+--
+-- host domain informations table
+--
+CREATE TABLE `host` (
+	`domain` TEXT NOT NULL, PRIMARY KEY(`domain`(255)),
+	`realm`	TINYTEXT NOT NULL, KEY `realm` (`realm`(255)),
+	`object-sequence` BIGINT NOT NULL AUTO_INCREMENT, KEY(`object-sequence`),
+	`pemfile` TEXT,
+	`verify-mode` TINYINT DEFAULT '0',
+	`cachain` TEXT,
+	`require-starttls` TINYINT DEFAULT '1',
+	`register-enable`  TINYINT DEFAULT '0',
+	`register-oob`	TEXT,
+	`instructions`	MEDIUMTEXT,
+	`password-change`  TINYINT DEFAULT '0',
+	`status` TINYTEXT) DEFAULT CHARSET=UTF8;
+

@@ -28,6 +28,7 @@
   */
 
 sig_atomic_t sm_lost_router = 0;
+sig_atomic_t sm_update_host = 0;
 
 /** our master callback */
 int sm_sx_callback(sx_t s, sx_event_t e, void *data, void *arg) {
@@ -124,7 +125,7 @@ int sm_sx_callback(sx_t s, sx_event_t e, void *data, void *arg) {
             nad_append_attr(nad, -1, "name", sm->id);
             log_debug(ZONE, "requesting component bind for '%s'", sm->id);
             sx_nad_write(sm->router, nad);
-
+            
             if(xhash_iter_first(sm->hosts))
             do {
                 xhash_iter_get(sm->hosts, (void *) &domain, &len, NULL);
@@ -140,8 +141,10 @@ int sm_sx_callback(sx_t s, sx_event_t e, void *data, void *arg) {
                 nad_append_attr(nad, -1, "multi", "to");
                 log_debug(ZONE, "requesting domain bind for '%.*s'", len, domain);
                 sx_nad_write(sm->router, nad);
-            
             } while(xhash_iter_next(sm->hosts));
+            
+            sm_update_host = 1;
+            
             break;
 
         case event_PACKET:

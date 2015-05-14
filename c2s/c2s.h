@@ -118,6 +118,16 @@ struct sess_st {
 #define AR_MECH_TRAD_DIGEST     (1<<1)
 #define AR_MECH_TRAD_CRAMMD5    (1<<2)
 
+/** host pending status from mysql host table */
+/** should set it to host_normal whenever we processed it */
+typedef enum {
+    host_normal = 0,          /**< host normal status */
+    host_add,                 /**< host added */
+    host_mod,                 /**< host has been modified */
+    host_offline,             /**< host goes to offline, removed from sm_avail only */
+    host_delete               /**< host should be removed from hosts and sm_avail */
+} host_state;
+
 struct host_st {
     /** our realm (SASL) */
     const char          *realm;
@@ -143,6 +153,8 @@ struct host_st {
     const char          *ar_register_oob;
     int                 ar_register_password;
 
+    /** pending status*/
+    host_state          host_status;
 };
 
 struct c2s_st {
@@ -337,6 +349,15 @@ struct authreg_st
     int         (*create_user)(authreg_t ar, const char *username, const char *realm);
     int         (*delete_user)(authreg_t ar, const char *username, const char *realm);
 
+    /** get hosts list*/
+    int         (*get_hosts_by_status)(authreg_t ar, const char *cond, xht* hosts);
+    
+    /** reset hosts status to host_normal by specified condition*/
+    int         (*set_hosts_status)(authreg_t ar, const char *cond, const char *status);
+    
+    /** delete host from table */
+    int         (*delete_hosts)(authreg_t ar, const char *cond);
+    
     void        (*free)(authreg_t ar);
 
     /* Additions at the end - to preserve offsets for existing modules */

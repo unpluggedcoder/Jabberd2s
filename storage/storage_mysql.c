@@ -421,6 +421,115 @@ static st_ret_t _st_mysql_get(st_driver_t drv, const char *type, const char *own
     return st_SUCCESS;
 }
 
+/** Implement of get custom_sql */
+static st_ret_t _st_get_custom_sql(st_driver_t drv, const char *request, os_t *os) {
+    drvdata_t data = (drvdata_t) drv->private;
+    MYSQL_RES *res;
+    MYSQL_FIELD *fields;
+    MYSQL_ROW tuple;
+    int ntuples, nfields, i, j;
+    os_object_t o;
+    char *val;
+    os_type_t ot;
+    int ival;
+    
+    if(mysql_ping(data->conn) != 0) {
+        log_write(drv->st->log, LOG_ERR, "mysql: connection to database lost");
+        return st_FAILED;
+    }
+    
+    log_debug(ZONE, "prepared custom sql: %s", request);
+    if(mysql_query(data->conn, request) != 0) {
+        log_write(drv->st->log, LOG_ERR, "mysql: sql select failed: %s", mysql_error(data->conn));
+        return st_FAILED;
+    }
+    
+    res = mysql_store_result(data->conn);
+    if(res == NULL) {
+        log_write(drv->st->log, LOG_ERR, "mysql: sql result retrieval failed: %s", mysql_error(data->conn));
+        return st_FAILED;
+    }
+    
+    ntuples = mysql_num_rows(res);
+    if(ntuples == 0) {
+        mysql_free_result(res);
+        return st_NOTFOUND;
+    }
+
+    log_debug(ZONE, "%d tuples returned", ntuples);
+
+    nfields = mysql_num_fields(res);
+
+    if(nfields == 0) {
+        log_debug(ZONE, "weird, tuples were returned but no fields *shrug*");
+        mysql_free_result(res);
+        return st_NOTFOUND;
+    }
+
+    fields = mysql_fetch_fields(res);
+    
+    *os = os_new();
+
+    for(i = 0; i < ntuples; i++) {
+        o = os_object_new(*os);
+
+        if((tuple = mysql_fetch_row(res)) == NULL)
+            break;
+
+        for(j = 0; j < nfields; j++) {
+            if(tuple[j] == NULL)
+                continue;
+
+            // mysql_fetch_lengths(res); // TODO check if mysql_fetch_lengths must be called.
+
+            switch(fields[j].type) {
+                case FIELD_TYPE_TINY:   /* tinyint */
+                    ot = os_type_BOOLEAN;
+                    break;
+
+                case FIELD_TYPE_LONG:   /* integer */
+                    ot = os_type_INTEGER;
+                    break;
+
+                case FIELD_TYPE_BLOB:   /* text */
+                case FIELD_TYPE_VAR_STRING:   /* varchar */
+                    ot = os_type_STRING;
+                    break;
+
+                default:
+                    log_debug(ZONE, "unknown field type %d, ignoring it", fields[j].type);
+                    continue;
+            }
+
+            val = tuple[j];
+
+            switch(ot) {
+                case os_type_BOOLEAN:
+                    ival = (val[0] == '0') ? 0 : 1;
+                    os_object_put(o, fields[j].name, &ival, ot);
+                    break;
+
+                case os_type_INTEGER:
+                    ival = atoi(val);
+                    os_object_put(o, fields[j].name, &ival, ot);
+                    break;
+
+                case os_type_STRING:
+                    os_object_put(o, fields[j].name, val, os_type_STRING);
+                    break;
+
+		case os_type_NAD:
+		case os_type_UNKNOWN:
+                    break;
+            }
+        }
+    }
+    
+    mysql_free_result(res);
+
+    return st_SUCCESS;
+}
+
 static st_ret_t _st_mysql_count(st_driver_t drv, const char *type, const char *owner, const char *filter, int *count) {
     drvdata_t data = (drvdata_t) drv->private;
     char *cond, *buf = NULL;

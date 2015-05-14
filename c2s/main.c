@@ -513,6 +513,168 @@ static void _c2s_hosts_expand_with_config(c2s_t c2s, config_t conf)
     c2s->hosts = newhosts;
 }
 
+/** copy src_host to des_host which is in the des_xht*/
+/** if id == NULL we update exist des_host, or we add new host to des_xht*/
+static int _c2s_util_copy_host(c2s_t c2s, xht des_xht, host_t des_host, host_t src_host, const char* id) {
+    int badd = 0;
+    if(des_xht == NULL || src_host == NULL || (des_host == NULL && id == NULL )) {
+        log_write(c2s->log, LOG_NOTICE, "NULL pointer passed to _c2s_util_copy_host");
+        return 1;
+    }
+    
+    if(des_host == NULL) {
+        des_host = (host_t) pmalloco(xhash_pool(des_xht), sizeof(struct host_st));
+        badd = 1;
+    }
+    
+    des_host->realm = pstrdup(xhash_pool(des_xht), src_host->realm);
+    
+    if(src_host->host_pemfile != NULL)
+        des_host->host_pemfile = pstrdup(xhash_pool(des_xht), src_host->host_pemfile);
+    
+    if(src_host->host_cachain != NULL)
+        des_host->host_cachain = pstrdup(xhash_pool(des_xht), src_host->host_cachain);
+    
+    if(src_host->ar_register_instructions != NULL)
+        des_host->ar_register_instructions = pstrdup(xhash_pool(des_xht), src_host->ar_register_instructions);
+    
+    if(src_host->ar_register_oob != NULL)
+        des_host->ar_register_oob = pstrdup(xhash_pool(des_xht), src_host->ar_register_oob);
+    
+    des_host->host_verify_mode = src_host->host_verify_mode;
+    des_host->host_require_starttls = src_host->host_require_starttls;
+    des_host->ar_register_enable = src_host->ar_register_enable;
+    des_host->ar_register_password = src_host->ar_register_password;
+    des_host->host_status = src_host->host_status;
+    
+    if(des_host->ar_register_enable || des_host->ar_register_oob) {
+        if(des_host->ar_register_instructions == NULL) {
+            if(des_host->ar_register_oob)
+                des_host->ar_register_instructions = "Only web based registration is possible with this server.";
+            else
+                des_host->ar_register_instructions = "Enter a username and password to register with this server.";
+            }
+    }
+    
+#ifdef HAVE_SSL
+    if(des_host->host_pemfile != NULL) {
+        if(c2s->sx_ssl == NULL) {
+            c2s->sx_ssl = sx_env_plugin(c2s->sx_env, sx_ssl_init, des_host->realm, des_host->host_pemfile, des_host->host_cachain, des_host->host_verify_mode, des_host->host_private_key_password);
+            if(c2s->sx_ssl == NULL) {
+                log_write(c2s->log, LOG_ERR, "failed to load %s SSL pemfile", des_host->realm);
+                des_host->host_pemfile = NULL;
+            }
+        } else {
+            if(sx_ssl_server_addcert(c2s->sx_ssl, des_host->realm, des_host->host_pemfile, des_host->host_cachain, des_host->host_verify_mode, des_host->host_private_key_password) != 0) {
+                log_write(c2s->log, LOG_ERR, "failed to load %s SSL pemfile", des_host->realm);
+                des_host->host_pemfile = NULL;
+            }
+        }
+    }
+#endif    
+    
+    if(badd)
+        xhash_put(des_xht, pstrdup(xhash_pool(des_xht), id), des_host);
+    
+    return 0;
+}
+
+/** process host_delete, host_add and host_mod situation */
+static void _c2s_host_update_callback(const char *key, int keylen, void *val, void *arg) {
+    host_t dbhost = (host_t) val;  // host read from database
+    c2s_t c2s = (c2s_t) arg;
+    
+    host_state status = dbhost->host_status;
+    switch(status) {
+        case host_normal:   // initial normal status, add it to c2s->hosts
+        case host_offline:  // offline processed by sm, it will send <unbind/> to us, we keep it in c2s->hosts
+            if(xhash_get(c2s->hosts, key) == NULL) {// we don`t want reload it when it`s already in host
+                _c2s_util_copy_host(c2s, c2s->hosts, xhash_get(c2s->hosts, key), dbhost, key);
+                log_write(c2s->log, LOG_NOTICE, "normal or offline update the host for %s", key);
+            }
+            break;
+        case host_mod:
+            _c2s_util_copy_host(c2s, c2s->hosts, xhash_get(c2s->hosts, key), dbhost, key);
+            log_write(c2s->log, LOG_NOTICE, "mod the host for %s", key);
+            break;
+        case host_add:
+            if(xhash_get(c2s->hosts, key) != NULL)
+                break; // break if not really add
+            
+            _c2s_util_copy_host(c2s, c2s->hosts, xhash_get(c2s->hosts, key), dbhost, key);
+            log_write(c2s->log, LOG_NOTICE, "add the host for %s", key);
+            break;
+        case host_delete:
+            xhash_zap(c2s->hosts, key);
+            log_write(c2s->log, LOG_NOTICE, "delete the host for %s", key);
+            break;
+        default:
+            break;
+    }
+}
+
+/** update host informations from mysql host table*/
+static int _c2s_db_update_host(c2s_t c2s) {
+    sess_t sess;
+    union xhashv xhv;
+    xht hosts = NULL;
+    host_t host;
+    
+    if(c2s->ar->get_hosts_by_status == NULL || c2s->ar->set_hosts_status == NULL)
+        return 1;
+    
+    if((c2s->ar->get_hosts_by_status)(c2s->ar, " `status`='delete' ", &hosts) || hosts == NULL) {
+        log_write(c2s->log, LOG_NOTICE, "cannot read delete hosts from database");
+    }else {
+        // update host status in sessions
+        if(xhash_iter_first(c2s->sessions))
+            do {
+                xhv.sess_val = &sess;
+                xhash_iter_get(c2s->sessions, NULL, NULL, xhv.val);
+            
+                if(sess->resources != NULL) {
+                    if(xhash_get(hosts,  sess->resources->jid->domain) != NULL){
+                        /* domain will be removed,  close its session first */
+                        sess->active = 0;
+                        if(sess->s) sx_close(sess->s);
+                    
+                        log_write(c2s->log, LOG_NOTICE, "remove %s from sessions and hosts", sess->resources->jid->domain);
+                    }
+                }
+           } while(xhash_iter_next(c2s->sessions));
+        xhash_walk(hosts, _c2s_host_update_callback, (void *) c2s);
+        xhash_free(hosts);
+    }
+    
+    hosts = NULL;
+    if((c2s->ar->get_hosts_by_status)(c2s->ar, " `status`!='delete' ", &hosts) || hosts == NULL) {
+        log_write(c2s->log, LOG_ERR, "cannot read available hosts from database");
+        return 1;
+    }
+    xhash_walk(hosts, _c2s_host_update_callback, (void *) c2s);
+	// update host status in sessions
+	if (xhash_iter_first(c2s->sessions))
+		do {
+			xhv.sess_val = &sess;
+			xhash_iter_get(c2s->sessions, NULL, NULL, xhv.val);
+
+			if (sess->resources != NULL) {
+				host_t currhost = xhash_get(hosts, sess->resources->jid->domain);
+				if (currhost != NULL) {
+					sess->host = currhost;
+				}
+			}
+		} while (xhash_iter_next(c2s->sessions));
+    xhash_free(hosts);
+    
+    // for host_mod status, we reset it to normal
+    // other states, process in _c2s_component_presence
+    if((c2s->ar->set_hosts_status)(c2s->ar, " `status` = 'mod'", "normal")) {
+        log_write(c2s->log, LOG_ERR, "cannot reset host status to normal");
+    }
+    return 0;
+}
+
 static int _c2s_router_connect(c2s_t c2s) {
     log_write(c2s->log, LOG_NOTICE, "attempting connection to router at %s, port=%d", c2s->router_ip, c2s->router_port);
 
@@ -917,7 +1079,8 @@ JABBER_MAIN("jabberd2c2s", "Jabber 2 C2S", "Jabber Open Source Server: Client to
 
     /* hosts mapping */
     c2s->hosts = xhash_new(1021);
-    _c2s_hosts_expand(c2s);
+    //_c2s_hosts_expand(c2s);
+    _c2s_db_update_host(c2s);
     c2s->sm_avail = xhash_new(1021);
 
     c2s->retry_left = c2s->retry_init;
@@ -942,20 +1105,21 @@ JABBER_MAIN("jabberd2c2s", "Jabber 2 C2S", "Jabber Open Source Server: Client to
 
         //  reload configurations
         if(c2s_reconf) {
-            log_write(c2s->log, LOG_NOTICE, "reloading some configuration items ...");
-            config_t conf;
-            conf = config_new();
+            log_write(c2s->log, LOG_NOTICE, "SIGUSR1:  reconfig hosts mapping ...");
+//            config_t conf;
+//            conf = config_new();
+//            
+//            if (conf && config_load(conf, config_file) == 0) {
+//                // expand with new configuration
+//                _c2s_hosts_expand_with_config(c2s, conf);
+//                config_free(conf);
+//            }else {
+//                log_write(c2s->log, LOG_WARNING, "couldn't reload config (%s)", config_file);
+//                if (conf) config_free(conf);
+//            }
             
-            if (conf && config_load(conf, config_file) == 0) {
-                // expand with new configuration
-                _c2s_hosts_expand_with_config(c2s, conf);
-                
-                config_free(conf);
-                log_write(c2s->log, LOG_NOTICE, "reconfig hosts mapping ...");
-            }else {
-                log_write(c2s->log, LOG_WARNING, "couldn't reload config (%s)", config_file);
-                if (conf) config_free(conf);
-            }
+            _c2s_db_update_host(c2s);
+            log_write(c2s->log, LOG_NOTICE, "reconfig hosts finished ...");
             c2s_reconf = 0;
         }
                 

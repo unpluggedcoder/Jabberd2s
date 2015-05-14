@@ -230,6 +230,9 @@ ST_API st_ret_t        storage_delete(storage_t st, const char *type, const char
 /** replace objects matching this filter with objects in this set (atomic delete + get) */
 ST_API st_ret_t        storage_replace(storage_t st, const char *type, const char *owner, const char *filter, os_t os);
 
+/** get host by condition*/
+ST_API st_ret_t        storage_get_host(storage_t st, const char *sql, os_t *os);
+
 /** type for the driver init function */
 typedef st_ret_t (*st_driver_init_fn)(st_driver_t);
 

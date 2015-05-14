@@ -422,6 +422,187 @@ static int _ar_mysql_check_sql( authreg_t ar, const char * sql, const char * typ
   return 1;
 }
 
+/* Get host table content into a list*/
+/* Returns 0 on success, or 1 on errors. */
+static int _ar_mysql_get_hosts( authreg_t ar, const char *cond, xht* hosts) {
+    mysqlcontext_t ctx = (mysqlcontext_t) ar->private;
+    MYSQL *conn = ctx->conn;
+    MYSQL_RES *res;
+    MYSQL_FIELD *fields;
+    MYSQL_ROW tuple;
+    int ntuples, nfields, i, j, ival;
+    char *val;
+    char buf[128] = {0};
+    
+    if(mysql_ping(conn) != 0) {
+        log_write(ar->c2s->log, LOG_ERR, "mysql: connection to database lost");
+        return 1;
+    }
+    
+    // if status not defined, we select all of them
+    if(cond != NULL)
+        snprintf(buf, 127, "SELECT * FROM `host` WHERE %s ", cond);
+    else
+        snprintf(buf, 127, "SELECT * FROM `host` ");
+    
+    log_debug(ZONE, "prepared sql: %s", buf);
+    if(mysql_query(conn, buf) != 0) {
+        log_write(ar->c2s->log, LOG_ERR, "mysql: sql select failed: %s", mysql_error(conn));
+        return 1;
+    }
+    
+    res = mysql_store_result(conn);
+    if(res == NULL) {
+        log_write(ar->c2s->log, LOG_ERR, "mysql: sql result retrieval failed: %s", mysql_error(conn));
+        return 1;
+    }
+    
+    ntuples = mysql_num_rows(res);
+    if(ntuples == 0) {
+        log_write(ar->c2s->log, LOG_ERR, "mysql: empty rows in host table");
+        mysql_free_result(res);
+        return 1;
+    }
+    
+    nfields = mysql_num_fields(res);
+
+    if(nfields == 0) {
+        log_debug(ZONE, "weird, tuples were returned but no fields *shrug*");
+        mysql_free_result(res);
+        return 1;
+    }
+    
+    // ready to read hosts
+    fields = mysql_fetch_fields(res);
+    
+    (*hosts) = xhash_new(1021);
+    for(i = 0; i < ntuples; i++) {
+        if((tuple = mysql_fetch_row(res)) == NULL)
+            break;
+        
+        host_t host = (host_t) pmalloco(xhash_pool((*hosts)), sizeof(struct host_st));
+        char *id = NULL;
+        for(j = 0; j < nfields; j++) {
+            if(tuple[j] == NULL)
+                continue;
+            
+            val = tuple[j];
+            if(strcmp(fields[j].name, "domain") == 0) {
+                id = pstrdup(xhash_pool((*hosts)), (const char *)val);
+            }
+            else if(strcmp(fields[j].name, "realm") == 0) {
+                host->realm = pstrdup(xhash_pool((*hosts)), (const char *)val);
+            }
+            else if(strcmp(fields[j].name, "pemfile") == 0) {
+                host->host_pemfile = pstrdup(xhash_pool((*hosts)), (const char *)val);
+            }
+            else if(strcmp(fields[j].name, "verify-mode") == 0) {
+                ival = atoi(val);
+                host->host_verify_mode = ival;
+            }
+            else if(strcmp(fields[j].name, "cachain") == 0) {
+                host->host_cachain = pstrdup(xhash_pool((*hosts)), (const char *)val);
+            }
+            else if(strcmp(fields[j].name, "require-starttls") == 0) {
+                ival = atoi(val);
+                host->host_require_starttls = (ival != 0);
+            }
+            else if(strcmp(fields[j].name, "register-enable") == 0) {
+                ival = atoi(val);
+                host->ar_register_enable = (ival != 0);
+            }
+            else if(strcmp(fields[j].name, "register-oob") == 0) {
+                host->ar_register_oob = pstrdup(xhash_pool((*hosts)), (const char *)val);
+            }
+            else if(strcmp(fields[j].name, "instructions") == 0) {
+                host->ar_register_instructions = pstrdup(xhash_pool((*hosts)), (const char *)val);
+            }
+            else if(strcmp(fields[j].name, "password-change") == 0) {
+                ival = atoi(val);
+                host->ar_register_password = (ival != 0);
+            }
+            else if(strcmp(fields[j].name, "status") == 0) {
+                if(strcmp(val, "normal") == 0){
+                    host->host_status = host_normal;
+                }
+                else if(strcmp(val, "add") == 0){
+                    host->host_status = host_add;
+                }
+                else if(strcmp(val, "mod") == 0){
+                    host->host_status = host_mod;
+                }
+                else if(strcmp(val, "offline") == 0){
+                    host->host_status = host_offline;
+                }
+                else if(strcmp(val, "delete") == 0){
+                    host->host_status = host_delete;
+                }
+            }
+        }
+        if(id != NULL)
+            xhash_put((*hosts), pstrdup(xhash_pool((*hosts)), id), host);
+        else {// should never be here
+            log_write(ar->c2s->log, LOG_ERR, "mysql: domain empty in host table");
+        }
+    }
+    mysql_free_result(res);
+    return 0;
+}
+
+/** reset hosts status to host_normal by specified condition*/
+static int _ar_mysql_set_hosts_status( authreg_t ar, const char *cond, const char *status) {
+    mysqlcontext_t ctx = (mysqlcontext_t) ar->private;
+    MYSQL *conn = ctx->conn;
+    char buf[128] = {0};
+    
+    if(mysql_ping(conn) != 0) {
+        log_write(ar->c2s->log, LOG_ERR, "mysql: connection to database lost");
+        return 1;
+    }
+    
+    if(cond == NULL || status == NULL) {
+        log_write(ar->c2s->log, LOG_ERR, "mysql: passed null condition to reset_host");
+        return 1;
+    }
+    
+    snprintf(buf, 127, "UPDATE `host` SET `status` = '%s' WHERE %s ", status, cond);
+    log_debug(ZONE, "prepared sql: %s", buf);
+
+    if(mysql_query(conn, buf) != 0) {
+        log_write(ar->c2s->log, LOG_ERR, "mysql: sql update failed: %s", mysql_error(conn));
+        return 1;
+    }
+    log_write(ar->c2s->log, LOG_NOTICE, "mysql: sql update OK: %s", buf);
+    return 0;
+}
+
+/** delete host(s) by specified condition*/
+static int _ar_mysql_delete_hosts(authreg_t ar, const char *cond) {
+    mysqlcontext_t ctx = (mysqlcontext_t) ar->private;
+    MYSQL *conn = ctx->conn;
+    char buf[128] = {0};
+    
+    if(mysql_ping(conn) != 0) {
+        log_write(ar->c2s->log, LOG_ERR, "mysql: connection to database lost");
+        return 1;
+    }
+    
+    if(cond == NULL) {
+        log_write(ar->c2s->log, LOG_ERR, "mysql: passed null condition to reset_host");
+        return 1;
+    }
+    
+    snprintf(buf, 127, "DELETE FROM `host` WHERE %s ", cond);
+    log_debug(ZONE, "prepared sql: %s", buf);
+
+    if(mysql_query(conn, buf) != 0) {
+        log_write(ar->c2s->log, LOG_ERR, "mysql: sql delete failed: %s", mysql_error(conn));
+        return 1;
+    }
+    log_write(ar->c2s->log, LOG_NOTICE, "mysql: sql delete OK: %s", buf);
+    return 0;
+}
+
 /** start me up */
 DLLEXPORT int ar_init(authreg_t ar) {
     const char *host, *port, *dbname, *user, *pass;

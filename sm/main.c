@@ -174,7 +174,9 @@ static void _sm_config_expand(sm_t sm)
     }
 }
 
-/* reconfig hosts with configurations and broadcast it */
+/** DEPRECATED!! 
+ * reconfig hosts with configurations and broadcast it. 
+ */
 static void _sm_hosts_reconfig(sm_t sm, config_t conf)
 {
     config_elem_t elem;
@@ -233,6 +235,91 @@ static void _sm_hosts_reconfig(sm_t sm, config_t conf)
     sm->hosts = domains;
 }
 
+/** update hosts information from database host table */
+static void _sm_db_hosts_update(sm_t sm, const char *cond)
+{
+    /* hosts in os_object_t hash table: key: field name of  domain and status */
+    os_t os;
+    os_object_t o;
+    char *domain;
+    char *status;
+    nad_t nad;
+    int ns, nelem;
+    char buf[150];
+    
+    if(cond == NULL)
+        snprintf(buf, sizeof(buf), "SELECT domain, status FROM host ORDER BY `object-sequence`");
+    else
+        snprintf(buf, sizeof(buf), "SELECT domain, status FROM host WHERE %s  ORDER BY `object-sequence`", cond);
+    
+    if(storage_get_host(sm->st, buf, &os) != st_SUCCESS) {
+        log_write(sm->log, LOG_ERR, "update hosts from database failed!");
+        return;
+    }
+    
+    if(os_iter_first(os))
+        do {
+            o = os_iter_object(os);
+            
+            /* domain name */
+            if(!os_object_get_str(os, o, "domain", &domain)) {
+                log_debug(ZONE, "item with no domain field, skipping");
+                continue;
+            }
+            
+            /* status name */
+            if(!os_object_get_str(os, o, "status", &status)) {
+                log_debug(ZONE, "item with no status field, skipping");
+                continue;
+            }
+
+            log_debug(ZONE, "got item for host: domain =  %s, status = %s", domain, status);
+            
+            if((strcmp(status, "normal") == 0 || strcmp(status, "mod") == 0 
+                    || strcmp(status, "add") == 0) && xhash_get(sm->hosts, domain) == NULL) {
+                // restore host, make it online, even it is add or mod
+                xhash_put(sm->hosts, pstrdup(xhash_pool(sm->hosts), domain), sm);
+
+                if(sm->router == NULL)
+                    continue;
+                
+                nad = nad_new();
+                ns = nad_add_namespace(nad, uri_COMPONENT, NULL);
+                nelem = nad_append_elem(nad, ns, "bind", 0);
+                nad_set_attr(nad, nelem, -1, "name", domain, strlen(domain));
+                nad_append_attr(nad, -1, "multi", "to");
+                log_debug(ZONE, "requesting domain bind for '%.*s'", strlen(domain), domain);
+                sx_nad_write(sm->router, nad);
+                        
+                log_write(sm->log, LOG_NOTICE, "requesting domain bind for '%.*s'", strlen(domain), domain);
+            }
+            else if(strcmp(status, "offline") == 0 || strcmp(status, "delete") == 0) {
+                xhash_zap(sm->hosts, domain);
+                
+                if(sm->router == NULL) {
+                    /* if router not connected yet, we put the domain into hosts, 
+                                     * and let it bind when router connected, so it can make <unbind/>
+                                     * pass the router on the next time */
+                    xhash_put(sm->hosts, pstrdup(xhash_pool(sm->hosts), domain), sm);
+                    continue;
+                }
+                
+                nad = nad_new();
+                ns = nad_add_namespace(nad, uri_COMPONENT, NULL);
+                nelem = nad_append_elem(nad, ns, "unbind", 0);
+                nad_set_attr(nad, nelem, -1, "name", domain, strlen(domain));
+                nad_append_attr(nad, -1, "multi", "to");
+                log_debug(ZONE, "requesting domain unbind for '%.*s'", strlen(domain), domain);
+                // let c2s delete it from host table even when the initial
+                sx_nad_write(sm->router, nad);
+                
+                log_write(sm->log, LOG_NOTICE, "requesting domain unbind for '%.*s'", strlen(domain), domain);
+            }
+        }while(os_iter_next(os));
+
+    os_free(os);
+}
+
 static void _sm_hosts_expand(sm_t sm)
 {
     config_elem_t elem;
@@ -285,7 +372,7 @@ JABBER_MAIN("jabberd2sm", "Jabber 2 Session Manager", "Jabber Open Source Server
     int optchar;
     sess_t sess;
     char id[1024];
-    //sleep(20);
+	
 #ifdef POOL_DEBUG
     time_t pool_time = 0;
 #endif
@@ -462,7 +549,8 @@ JABBER_MAIN("jabberd2sm", "Jabber 2 Session Manager", "Jabber Open Source Server
 
     /* vHosts map */
     sm->hosts = xhash_new(1021);
-    _sm_hosts_expand(sm);
+    //_sm_hosts_expand(sm);
+    _sm_db_hosts_update(sm, NULL);  // init host map from host table
 
     sm->retry_left = sm->retry_init;
     _sm_router_connect(sm);
@@ -483,22 +571,20 @@ JABBER_MAIN("jabberd2sm", "Jabber 2 Session Manager", "Jabber Open Source Server
 
         //  reload configurations
         if(sm_reconf) {
-            log_write(sm->log, LOG_NOTICE, "SIGUSR1: reloading some configuration items ...");
-            sleep(20);
-            config_t conf;
-            conf = config_new();
+            log_write(sm->log, LOG_NOTICE, "SIGUSR1: reconfig some configuration items ...");
+            _sm_db_hosts_update(sm, " `status` != 'mod' ");
             
-            if (conf && config_load(conf, config_file) == 0) {
-                _sm_hosts_reconfig(sm, conf);
-                
-                config_free(conf);
-                log_write(sm->log, LOG_NOTICE, "reloading finished");
-            } else {
-                log_write(sm->log, LOG_WARNING, "couldn't reload config (%s)", config_file);
-                if (conf) config_free(conf);
-            }
-            
+            log_write(sm->log, LOG_NOTICE, "reconfig hosts finished ...");
             sm_reconf = 0;
+        }
+        
+        if(sm_update_host) {
+            log_write(sm->log, LOG_NOTICE, "sm_update_host: update host for 'offline' and 'delete'");
+            // post <unbind/> for these hosts
+            _sm_db_hosts_update(sm, " `status` = 'offline' OR `status` = 'delete' ");
+            
+            log_write(sm->log, LOG_NOTICE, "sm_update_host: finished ...");
+            sm_update_host = 0;
         }
         
         if(sm_lost_router) {

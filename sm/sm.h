@@ -276,6 +276,7 @@ struct sess_st {
 };
 
 extern sig_atomic_t sm_lost_router;
+extern sig_atomic_t sm_update_host;
 
 /* functions */
 SM_API xht             aci_load(sm_t sm);

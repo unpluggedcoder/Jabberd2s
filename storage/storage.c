@@ -524,3 +524,9 @@ int storage_match(st_filter_t filter, os_object_t o, os_t os) {
 
     return _storage_match(filter, o, os);
 }
+
+st_ret_t storage_get_host(storage_t st, const char *sql, os_t* os) {
+    log_debug(ZONE, "storage_get_host: sql=%s", sql);
+    
+    return storage_get_custom_sql(st, sql, os, NULL);
+}

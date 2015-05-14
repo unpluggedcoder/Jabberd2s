@@ -5,7 +5,8 @@ This project is based on Jabberd-2.3.2, the current stable version of Jabberd2.
 What`s difference
 
 Add dynamic configuration for multi-domain of XMPP servers(so named it Jabberd2s :) )
- - Switch XMPP server`s status(online/offline) without restart Jabberd2 by modify the sm.xml and the c2s.xml file directly.
+ - Switch XMPP server`s status(online/offline/delete/..etc) without restart Jabberd2 by modify the host table in mysql directly.
+   Use tools/db-setup.mysql to create host table in database;
 
 Add refconfiguration mechanism
  - Change the reaction of SIGUSR1 and SIGUSR2, SIGUSR1 will trigger the reconfiguration, SIGUSR2 switch debug status.

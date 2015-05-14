@@ -648,6 +648,7 @@ static int _c2s_client_mio_callback(mio_t m, mio_action_t a, mio_fd_t fd, void *
 static void _c2s_component_presence(c2s_t c2s, nad_t nad) {
     int attr;
     char from[1024];
+    char cond[128];
     sess_t sess;
     union xhashv xhv;
 
@@ -664,9 +665,18 @@ static void _c2s_component_presence(c2s_t c2s, nad_t nad) {
 
         log_debug(ZONE, "sm for serviced domain '%s' online", from);
 
-        xhash_put(c2s->sm_avail, pstrdup(xhash_pool(c2s->sm_avail), from), (void *) 1);
-
+        if(xhash_get(c2s->sm_avail, from) == NULL)
+            xhash_put(c2s->sm_avail, pstrdup(xhash_pool(c2s->sm_avail), from), (void *) 1);
         nad_free(nad);
+        
+        if(strcmp(from, "c2s") == 0 || strcmp(from, "sm") == 0 || strcmp(from, "s2s") == 0)
+            return;
+        
+        // change status from add to normal
+        snprintf(cond, 127, " `status`='add' AND `domain` = '%s' ", from);
+        if(c2s->ar->set_hosts_status == NULL || (c2s->ar->set_hosts_status)(c2s->ar, cond, "normal")) {
+            log_write(c2s->log, LOG_ERR, "cannot reset host status to normal");
+        }
         return;
     }
 
@@ -694,6 +704,14 @@ static void _c2s_component_presence(c2s_t c2s, nad_t nad) {
             } while(xhash_iter_next(c2s->sessions));
 
         xhash_zap(c2s->sm_avail, from);
+        
+        if(strcmp(from, "c2s") == 0 || strcmp(from, "sm") == 0 || strcmp(from, "s2s") == 0)
+            return;
+        // keep its status when `status`="offline", delete it when `status`="delete"
+        snprintf(cond, 127, " `status`='delete' AND `domain`='%s' ", from);
+        if(c2s->ar->delete_hosts == NULL || (c2s->ar->delete_hosts)(c2s->ar, cond)) {
+            log_write(c2s->log, LOG_ERR, "cannot reset host status to normal");
+        }
     }
 }
 
